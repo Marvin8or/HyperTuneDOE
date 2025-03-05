@@ -17,8 +17,19 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 RSTATE = 11
 TSIZE = 0.2
-NSPLITS = 10
+NSPLITS = 3
 TARGET = "MSE"
+FIGSIZE_FULL = (10, 5.625)
+FIGSIZE_HALF = (5.625, 5.625)
+FONTSIZE_AXES = 12
+FONTSIZE_TITLE = 15
+
+
+def round_dataframe(df):
+    def round_value1(x):
+        return round(x, 3) if x >= 0.05 else x  # Keep original if < 0.05
+
+    return df.map(round_value1)
 
 
 def evaluate_model(X, y, target, model_hyperparams=None):
@@ -37,59 +48,81 @@ def evaluate_model(X, y, target, model_hyperparams=None):
         )
 
     for i, (train_idx, val_idx) in enumerate(kf.split(X_train)):
-        # Evaluating on split
         Xtrain, Xval = X_train.values[train_idx], X_train.values[val_idx]
         ytrain, yval = y_train.values[train_idx], y_train.values[val_idx]
         fitted_model = dtr_model.fit(Xtrain, ytrain.ravel())
+        # print(fitted_model.get_params())
         yvalpred = fitted_model.predict(Xval)
 
         kf_performance_metrics["MSE"].append(
             mean_squared_error(yval, yvalpred)
-        )
-        kf_performance_metrics["RMSE"].append(
-            np.sqrt(mean_squared_error(yval, yvalpred))
         )
         kf_performance_metrics["R2"].append(r2_score(yval, yvalpred))
 
     mean_target_over_folds = np.round(
         np.mean(kf_performance_metrics[target]), 3
     )
+
     return mean_target_over_folds
 
 
-def run_experiments(X, y, target, mapped_exp_des_template, n_repetitions=2):
+def run_experiments(
+    X, y, target, mapped_exp_des_template, n_reps, fixed_params=None
+):
     results_df = pd.DataFrame()
-    for repetition_idx in range(n_repetitions):
-        rows = mapped_exp_des_template.to_dict(orient="records")
-        repetition_result = np.zeros(shape=(len(mapped_exp_des_template),))
-        for i, run_hyperparams in enumerate(rows):
-            if "max_leaf_nodes" in run_hyperparams.keys():
-                if run_hyperparams["max_leaf_nodes"] is not None:
-                    run_hyperparams["max_leaf_nodes"] = int(
-                        run_hyperparams["max_leaf_nodes"]
-                    )
-            repetition_result[i] = evaluate_model(
-                X, y, target, run_hyperparams
+    rows = mapped_exp_des_template.to_dict(orient="records")
+    repetition_result = np.zeros(shape=(len(mapped_exp_des_template)))
+    for i, run_hyperparams in enumerate(rows):
+        if (
+            "max_features" in run_hyperparams.keys()
+            and run_hyperparams["max_features"] is not None
+        ):
+            run_hyperparams["max_features"] = int(
+                run_hyperparams["max_features"]
+            )
+        if (
+            "max_depth" in run_hyperparams.keys()
+            and run_hyperparams["max_depth"] is not None
+        ):
+            run_hyperparams["max_depth"] = int(run_hyperparams["max_depth"])
+
+        if (
+            "max_leaf_nodes" in run_hyperparams.keys()
+            and run_hyperparams["max_leaf_nodes"] is not None
+        ):
+            run_hyperparams["max_leaf_nodes"] = int(
+                run_hyperparams["max_leaf_nodes"]
             )
 
-        results_df[f"{target}_{repetition_idx+1}"] = repetition_result
+        if fixed_params is not None:
+            run_hyperparams = dict(**run_hyperparams, **fixed_params)
 
-    repetition_cols = [
-        f"{target}_{repetition_idx+1}"
-        for repetition_idx in range(n_repetitions)
-    ]
-    results_df[target] = np.mean(results_df[repetition_cols], axis=1)
-    results_df = results_df.drop(columns=repetition_cols)
+        for r in range(n_reps):
+            repetition_result[i] += evaluate_model(
+                X, y, target, run_hyperparams
+            )
+        repetition_result[i] = repetition_result[i] / n_reps
+
+    results_df[f"{target}"] = repetition_result
+
     return results_df
 
 
-def create_main_effects_plots(data, y, repetition_results: list):
+def create_main_effects_plots(
+    data, y, figsize=FIGSIZE_FULL, save_path=None, save_prefix=None
+):
     # Get all column names except for the response variable
-    factors = [col for col in data.columns if col not in repetition_results]
+    factors = [col for col in data.columns if col != y]
 
+    # Get levels
+    levels = []
+    for fi, fname in enumerate(factors):
+        levels.append(np.unique(data[factors].values))
+
+    levels = np.unique(levels)
     for fi, fname in enumerate(factors):
         means = []
-        levels = [-1, 1]
+        # print(levels)
         min_vals = []
         max_vals = []
         for l in levels:
@@ -99,8 +132,10 @@ def create_main_effects_plots(data, y, repetition_results: list):
             min_vals.append(np.abs(mean_val - np.min(data[y][mask])))
             max_vals.append(np.abs(np.max(data[y][mask]) - mean_val))
 
-        fig, axs = plt.subplots(1, 1, figsize=(5, 5))
-        fig.suptitle(f"Effect of '{fname}'")
+        # print(means)
+
+        fig, axs = plt.subplots(1, 1, figsize=figsize)
+        fig.suptitle(f"Effect of '{fname}'", fontsize=FONTSIZE_TITLE)
         axs.errorbar(
             levels,
             means,
@@ -111,24 +146,36 @@ def create_main_effects_plots(data, y, repetition_results: list):
         )
         # axs.legend()
         axs.set_xticks(levels)
-        axs.set_xlabel(fname)
-        axs.set_ylabel(y)
+        axs.set_xlabel(fname, fontsize=FONTSIZE_AXES)
+        axs.set_ylabel(y, fontsize=FONTSIZE_AXES)
         axs.grid()
         # axs.set_ylim(np.min(data[y]), np.max(data[y]))
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(
+                save_path + f"/{save_prefix}_{fname}_main_effect.png",
+                dpi=300,
+                bbox_inches="tight",
+            )
 
-    plt.tight_layout()
 
-
-def create_interaction_plots(data, y, repetition_results):
-    factors = [col for col in data.columns if col not in repetition_results]
+def create_interaction_plots(
+    data, y, figsize=FIGSIZE_FULL, save_path=None, save_prefix=None
+):
+    factors = [col for col in data.columns if col != y]
 
     factor_pairs = combinations(factors, 2)
+
+    # Get levels
+    levels = {f: [] for f in factors}
+    for fi, fname in enumerate(factors):
+        levels[fname].append(np.unique(data[factors].values))
 
     for f1, f2 in factor_pairs:
         levels_f1 = np.unique(data[f1])
         levels_f2 = np.unique(data[f2])
 
-        fig, axs = plt.subplots(1, 1, figsize=(5, 5))
+        fig, axs = plt.subplots(1, 1, figsize=figsize)
         for l2 in levels_f2:
             means = []
             min_vals = []
@@ -140,27 +187,21 @@ def create_interaction_plots(data, y, repetition_results):
                 means.append(mean_val)
                 min_vals.append(np.abs(mean_val - np.min(data[y][mask])))
                 max_vals.append(np.abs(np.max(data[y][mask]) - mean_val))
-            # axs.errorbar(
-            #     levels_f1,
-            #     means,
-            #     yerr=np.array([min_vals, max_vals]),
-            #     linewidth=3,
-            #     elinewidth=3,
-            #     marker="o",
-            #     label=f"{f2}={int(l2)}",
-            #     alpha=0.5,
-            #     capsize=7,
-            #     capthick=5
-            #     # label="Min. and Max. values at errorbars",
-            # )
             axs.plot(levels_f1, means, marker="o", label=f"{f2}={int(l2)}")
         axs.set_xticks(levels_f1)
-        axs.set_xlabel(f1)
-        axs.set_ylabel(f"Mean {y}")
-        axs.set_ylim(np.min(data[y]), np.max(data[y]))
-        fig.suptitle(f"{f1} : {f2}")
+        axs.set_xlabel(f1, fontsize=FONTSIZE_AXES)
+        axs.set_ylabel(f"Mean {y}", fontsize=FONTSIZE_AXES)
+        # axs.set_ylim(np.min(data[y]), np.max(data[y]))
+        fig.suptitle(f"{f1} : {f2}", fontsize=FONTSIZE_TITLE)
         axs.legend()
         axs.grid(True, linestyle="--", alpha=0.6)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(
+                save_path + f"/{save_prefix}_{f1}_{f2}_interaction_effect.png",
+                dpi=300,
+                bbox_inches="tight",
+            )
 
 
 # 'Filtration_rate ~ T + CoF + RPM + T:CoF + T:RPM'
@@ -198,3 +239,22 @@ def run_anova(mapped_experiments, factors, target, n_interactions, anova_typ):
     model = ols(anova_model_formula, data=mapped_experiments).fit()
     anova_results = sm.stats.anova_lm(model, typ=anova_typ)
     return model, anova_results
+
+
+def calculate_effects(data, factors, response, max_interactions):
+    effects = {}
+    n = len(data)
+
+    # Iterate through all main factors and their interactions
+    for r in range(1, min(len(factors), max_interactions) + 1):
+        for combination in combinations(factors, r):
+            term = "*".join(combination)
+            interaction_term = data[list(combination)].prod(
+                axis=1
+            )  # Multiply factor columns to get interaction
+            effect = (interaction_term * data[response]).sum() / (
+                n / 2
+            )  # Calculate effect
+            effects[term] = effect
+
+    return pd.DataFrame({"Factor": effects.keys(), "Effect": effects.values()})
